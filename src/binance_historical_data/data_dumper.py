@@ -171,8 +171,26 @@ class BinanceDataDumper:
             tld = "com"
         #####
         if self._asset_class == 'um':
+            if country_code == "US":
+                #load from our text file
+                #get the path to this file 
+                print("cannot get um tickers for US users, defaulting to saved tickers")
+                path_to_file = os.path.join(os.path.dirname(__file__), 'um_symbols.txt')
+                with open(path_to_file) as f:
+                    response = f.read()
+                return response.split('\n')
+            
             response = urllib.request.urlopen(f"https://fapi.binance.{tld}/fapi/v1/exchangeInfo").read()
         elif self._asset_class == 'cm':
+
+            if country_code == "US":
+                print("cannot get cm tickers for US users, defaulting to saved tickers")
+                #load from our text file
+                path_to_file = os.path.join(os.path.dirname(__file__), 'cm_symbols.txt')
+                with open(path_to_file) as f:
+                    response = f.read()
+                return response.split('\n')
+
             response = urllib.request.urlopen(f"https://dapi.binance.{tld}/dapi/v1/exchangeInfo").read()
         else:
             # https://api.binance.us/api/v3/exchangeInfo
