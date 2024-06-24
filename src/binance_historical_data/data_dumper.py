@@ -16,6 +16,7 @@ from dateutil.relativedelta import relativedelta
 from tqdm.auto import tqdm
 from char import char
 from mpire import WorkerPool
+import pandas as pd
 
 # Local imports
 
@@ -117,7 +118,7 @@ class BinanceDataDumper:
             "---> Data will be saved here: %s",
             os.path.join(os.path.abspath(self.path_dir_where_to_dump), self._asset_class))
 
-
+        self.save_path = os.path.join(os.path.abspath(self.path_dir_where_to_dump), self._asset_class)
 
 
         LOGGER.info("---> Data Frequency: %s", self._data_frequency)
@@ -530,6 +531,10 @@ class BinanceDataDumper:
                 "Unable to delete zip file %s with error: %s",
                 path_zip_raw_file, ex)
             return None
+        print(f"Downloaded {file_name}")
+        print(path_zip_raw_file)
+        print("date_obj", date_obj)
+        self._set_dataframe_columns(path_zip_raw_file.replace('.zip','.csv'))
         return date_obj
 
     def _get_path_suffix_to_dir_with_data(self, timeperiod_per_file, ticker):
@@ -707,3 +712,21 @@ class BinanceDataDumper:
                 date_to_use = date_to_use + relativedelta(days=1)
         LOGGER.debug("---> Dates created: %d", len(list_dates))
         return list_dates
+
+    def _set_dataframe_columns(self,df_path):
+
+        COLUMNS = ["open_time","open","high","low","close","volume","close_time","quote_asset_volume","number_of_trades","taker_buy_base_asset_volume","taker_buy_quote_asset_volume","ignore"]
+
+        df = pd.read_csv(df_path)
+        df.columns = COLUMNS
+        df = df.drop(["ignore"],axis=1)
+        df["open_time"] = pd.to_datetime(df["open_time"],unit='ms')
+        df["close_time"] = pd.to_datetime(df["close_time"],unit='ms')
+
+        #round both to seconds
+        df["open_time"] = df["open_time"].dt.round("S")
+        # df["close_time"] = df["close_time"].dt.round("S")
+        #save the file
+        df.to_csv(df_path,index=False)
+
+
