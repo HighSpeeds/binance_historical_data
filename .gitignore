@@ -54,3 +54,5 @@ MANIFEST
 .venv*/
 
 futures/
+test.ipynb 
+create_csv.py

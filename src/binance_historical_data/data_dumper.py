@@ -36,12 +36,14 @@ class BinanceDataDumper:
     _DATA_FREQUENCY_ENUM = ('1s','1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h',
                             '1d', '3d', '1w', '1mo')
 
+    _PATH_TO_TICKER_CSV = os.path.join(os.path.dirname(__file__), 'tickers{asset_class}.csv')
     def __init__(
             self,
             path_dir_where_to_dump,
             asset_class="spot",  # spot, um, cm
             data_type="klines",  # aggTrades, klines, trades
             data_frequency="1m",  # argument for data_type="klines"
+            update_dataframe = False,
     ) -> None:
         """Init object to dump all data from binance servers
 
@@ -77,10 +79,104 @@ class BinanceDataDumper:
         self._base_url = "https://data.binance.vision/data"
         self._asset_class = asset_class
         self._data_type = data_type
+        self._tickers:list[str] = []
+        self._date_starts:list[datetime.date] = []
+        self._date_ends:list[datetime.date] = []
+
+        #load tickers from file
+        self._load_df(asset_class)
+        if update_dataframe:
+            self.df = self._update_df(self.df)
+            self.df.to_csv(self.path_to_tickers,index=False)
+
+            
+    def _hash_tickers(self):
+        self.total_ticker_hash = set(self.df["symbol"].values)
+    
+    def _load_df(self,asset_class):
+        self.path_to_tickers = self._PATH_TO_TICKER_CSV.replace("{asset_class}",asset_class)
+        while True:
+            if os.path.exists(self.path_to_tickers):
+                self.df = pd.read_csv(self.path_to_tickers)
+                break
+            else:
+                #load from the txt files 
+                path_to_file = os.path.join(os.path.dirname(__file__), f'{asset_class}_symbols.txt')
+                with open(path_to_file) as f:
+                    tickers = f.readlines()
+                tickers = [ticker.strip() for ticker in tickers]
+                #create a dataframe
+                self.df = pd.DataFrame(tickers,columns=["symbol"])
+                self.df["start_date"] = None
+                self.df["end_date"] = None
+                self.df.to_csv(self.path_to_tickers,index=False)
+        self._hash_tickers()
 
 
+    def _update_df(self,df):
+        #update the tickers
 
+        country_code = self._get_user_country_from_ip()
+        if country_code == "US":
+            tld = "us"
+        else:
+            tld = "com"
+        #####
+        if self._asset_class == 'um' and country_code != "US":
 
+            new_tickers = urllib.request.urlopen(f"https://fapi.binance.{tld}/fapi/v1/exchangeInfo").read()
+        elif self._asset_class == 'cm' and country_code != "US":
+
+            new_tickers = urllib.request.urlopen(f"https://dapi.binance.{tld}/dapi/v1/exchangeInfo").read()
+        elif self._asset_class == 'spot':
+            # https://api.binance.us/api/v3/exchangeInfo
+            new_tickers = urllib.request.urlopen(f"https://api.binance.{tld}/api/v3/exchangeInfo").read()
+        else:
+            print("could not update the tickers for this asset class because it is not available in the US")
+        try:
+            new_tickers = list(map(
+                lambda symbol: symbol['symbol'],
+                json.loads(new_tickers)['symbols']
+            ))
+        except Exception as e:
+            print(e)
+            new_tickers = []
+        print(f"discovered {len(new_tickers)} new tickers")
+        #for the new tickers 
+        for t in new_tickers:
+            if t not in self.total_ticker_hash:
+                #add it to the dataframe
+                df.iloc[-1] = [t,None,None]
+        #fill in the nan values
+        for i in tqdm(range(len(df))):
+            #for each row
+            name,start_date,end_date = df.iloc[i]
+            if pd.isna(start_date) or pd.isna(end_date):
+                #get the min start date
+                flag,min_start_date,max_end_date = self.get_min_start_date_for_ticker(name)
+                if pd.isna(start_date):
+                    df.loc[i,"start_date"] = min_start_date
+                if pd.isna(end_date):
+                    if max_end_date != datetime.date(datetime.datetime.now().year,datetime.datetime.now().month,1) - relativedelta(days=1):
+                        df.loc[i,"end_date"] = max_end_date
+                    #otherwise this means that there is no end date for this ticker 
+                    #so we should not update it
+        #rehash the tickers
+        self._hash_tickers()
+        return df
+
+    def add_ticker(self,ticker:str,
+                     date_start:datetime.date,
+                     date_end:datetime.date):
+          
+          #check that the ticker is a valid ticker
+        if ticker not in self.total_ticker_hash:
+            raise ValueError(f"{ticker} is not a valid ticker")
+        self._tickers.append(ticker)
+        self._date_starts.append(date_start)
+        self._date_ends.append(date_end)
+                   
+                   
     @char
     def dump_data(
             self,
@@ -105,38 +201,46 @@ class BinanceDataDumper:
                 Flag if you want to update data if it's already exists
             int_max_tickers_to_get (int): Max number of trading pairs to get
         """
-        self.dict_new_points_saved_by_ticker.clear()
-        list_trading_pairs = self._get_list_trading_pairs_to_download(
-            tickers=tickers, tickers_to_exclude=tickers_to_exclude)
-        if int_max_tickers_to_get:
-            list_trading_pairs = list_trading_pairs[:int_max_tickers_to_get]
-        LOGGER.info(
-            "Download full data for %d tickers: ", len(list_trading_pairs))
+        if len(self._tickers) == 0:
+            self.dict_new_points_saved_by_ticker.clear()
+            list_trading_pairs = self._get_list_trading_pairs_to_download(
+                tickers=tickers, tickers_to_exclude=tickers_to_exclude)
+            if int_max_tickers_to_get:
+                list_trading_pairs = list_trading_pairs[:int_max_tickers_to_get]
+            LOGGER.info(
+                "Download full data for %d tickers: ", len(list_trading_pairs))
 
 
-        LOGGER.info(
-            "---> Data will be saved here: %s",
-            os.path.join(os.path.abspath(self.path_dir_where_to_dump), self._asset_class))
+            LOGGER.info(
+                "---> Data will be saved here: %s",
+                os.path.join(os.path.abspath(self.path_dir_where_to_dump), self._asset_class))
 
-        self.save_path = os.path.join(os.path.abspath(self.path_dir_where_to_dump), self._asset_class)
+            self.save_path = os.path.join(os.path.abspath(self.path_dir_where_to_dump), self._asset_class)
 
 
-        LOGGER.info("---> Data Frequency: %s", self._data_frequency)
-        # Start date
-        if date_start is None:
-            date_start = datetime.date(year=2017, month=1, day=1)
-        if date_start < datetime.date(year=2017, month=1, day=1):
-            date_start = datetime.date(year=2017, month=1, day=1)
-        # End date
-        if date_end is None:
-            date_end = datetime.datetime.utcnow().date()
-        if date_end > datetime.datetime.utcnow().date():
-            date_end = datetime.datetime.utcnow().date()
+            LOGGER.info("---> Data Frequency: %s", self._data_frequency)
+            # Start date
+            if date_start is None:
+                date_start = datetime.date(year=2017, month=1, day=1)
+            if date_start < datetime.date(year=2017, month=1, day=1):
+                date_start = datetime.date(year=2017, month=1, day=1)
+            # End date
+            if date_end is None:
+                date_end = datetime.datetime.utcnow().date()
+            if date_end > datetime.datetime.utcnow().date():
+                date_end = datetime.datetime.utcnow().date()
+
+            for ticker in list_trading_pairs:
+                self.add_ticker(ticker,date_start,date_end)
+            
         LOGGER.info("---> Start Date: %s", date_start.strftime("%Y%m%d"))
         LOGGER.info("---> End Date: %s", date_end.strftime("%Y%m%d"))
-        date_end_first_day_of_month = datetime.date(
-            year=date_end.year, month=date_end.month, day=1)
-        for ticker in tqdm(list_trading_pairs, leave=True, desc="Tickers"):
+        for i,ticker in enumerate(tqdm(list_trading_pairs, leave=True, desc="Tickers")):
+            date_start = self._date_starts[i]
+            date_end = self._date_ends[i]
+
+            date_end_first_day_of_month = datetime.date(
+                year=date_end.year, month=date_end.month, day=1)
             # 1) Download all monthly data
             if self._data_type != "metrics":
                 self._download_data_for_1_ticker(
@@ -164,42 +268,7 @@ class BinanceDataDumper:
 
     def get_list_all_trading_pairs(self):
         """Get all trading pairs available at binance now"""
-        # Select the right Top Level Domain for US/non US
-        country_code = self._get_user_country_from_ip()
-        if country_code == "US":
-            tld = "us"
-        else:
-            tld = "com"
-        #####
-        if self._asset_class == 'um':
-            if country_code == "US":
-                #load from our text file
-                #get the path to this file 
-                print("cannot get um tickers for US users, defaulting to saved tickers")
-                path_to_file = os.path.join(os.path.dirname(__file__), 'um_symbols.txt')
-                with open(path_to_file) as f:
-                    response = f.read()
-                return response.split('\n')
-            
-            response = urllib.request.urlopen(f"https://fapi.binance.{tld}/fapi/v1/exchangeInfo").read()
-        elif self._asset_class == 'cm':
-
-            if country_code == "US":
-                print("cannot get cm tickers for US users, defaulting to saved tickers")
-                #load from our text file
-                path_to_file = os.path.join(os.path.dirname(__file__), 'cm_symbols.txt')
-                with open(path_to_file) as f:
-                    response = f.read()
-                return response.split('\n')
-
-            response = urllib.request.urlopen(f"https://dapi.binance.{tld}/dapi/v1/exchangeInfo").read()
-        else:
-            # https://api.binance.us/api/v3/exchangeInfo
-            response = urllib.request.urlopen(f"https://api.binance.{tld}/api/v3/exchangeInfo").read()
-        return list(map(
-            lambda symbol: symbol['symbol'],
-            json.loads(response)['symbols']
-        ))
+        return self.df["symbol"].values
 
     @staticmethod
     def _get_user_country_from_ip() -> str:
@@ -241,7 +310,7 @@ class BinanceDataDumper:
         """Get minimum start date for ticker"""
         path_folder_prefix = self._get_path_suffix_to_dir_with_data("monthly", ticker)
         min_date = datetime.datetime(datetime.datetime.today().year, datetime.datetime.today().month, 1)
-
+        max_date = datetime.datetime(2017, 1, 1)
         try:
             date_found = False
 
@@ -250,24 +319,34 @@ class BinanceDataDumper:
                 date_str = file.split('.')[0].split('-')[-2:]
                 date_str = '-'.join(date_str)
                 date_obj = datetime.datetime.strptime(date_str, '%Y-%m')
+                print(date_obj,file)
                 if date_obj < min_date:
                     date_found = True
                     min_date = date_obj
+                if date_obj >= max_date:
+                    max_date = date_obj + relativedelta(months=1)-relativedelta(days=1)
+                    # print(max_date,date_obj)
 
             if not date_found:
                 path_folder_prefix = self._get_path_suffix_to_dir_with_data("daily", ticker)
                 files = self._get_list_all_available_files(prefix=path_folder_prefix)
+                print(files)
                 for file in files:
                     date_str = file.split('.')[0].split('-')[-3:]
                     date_str = '-'.join(date_str)
                     date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+                    print(date_obj)
                     if date_obj < min_date:
                         min_date = date_obj
+                        date_found = True
+                    if date_obj > max_date:
+                        max_date = date_obj
 
         except Exception as e:
             LOGGER.error('Min date not found: ', e)
-
-        return min_date.date()
+        if not date_found:
+            return False,min_date.date(),max_date.date()
+        return True,min_date.date(),max_date.date()
 
     def get_local_dir_to_data(self, ticker, timeperiod_per_file):
         """Path to directory where ticker data is saved
@@ -414,7 +493,10 @@ class BinanceDataDumper:
             is_to_update_existing=False,
     ):
         """Dump data for 1 ticker"""
-        min_start_date = self.get_min_start_date_for_ticker(ticker)
+        flag,min_start_date,max_date = self.get_min_start_date_for_ticker(ticker)
+        #if there is no data for this ticker
+        if not flag:
+            return
         LOGGER.debug(
             "Min Start date for ticker %s is %s",
             ticker,
@@ -531,9 +613,7 @@ class BinanceDataDumper:
                 "Unable to delete zip file %s with error: %s",
                 path_zip_raw_file, ex)
             return None
-        print(f"Downloaded {file_name}")
-        print(path_zip_raw_file)
-        print("date_obj", date_obj)
+        # 6) Set columns in the dataframes and process the datetimes
         self._set_dataframe_columns(path_zip_raw_file.replace('.zip','.csv'))
         return date_obj
 
